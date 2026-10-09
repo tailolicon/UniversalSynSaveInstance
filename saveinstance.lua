@@ -4143,18 +4143,18 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				local LowerInstanceName = string.lower(InstanceName)
 				local SkipEntirely
 
-				if not ClassTagOverride then -- ! Assuming anything that has __ClassName comes from save_extra
-					if
-						(not OPTIONS.ReadMe and LowerInstanceName == "readme")
-						or (
-							string.find(LowerInstanceName, "loadstring", 1, true)
-							and string.find(LowerInstanceName, "saveinstance", 1, true)
-						)
-					then
-						__DARKLUA_CONTINUE_87 = true
-						break
-					end
+				if
+					(not OPTIONS.ReadMe and LowerInstanceName == "readme")
+					or (
+						string.find(LowerInstanceName, "loadstring", 1, true)
+						and string.find(LowerInstanceName, "saveinstance", 1, true)
+					)
+				then
+					__DARKLUA_CONTINUE_87 = true
+					break
+				end
 
+				if not ClassTagOverride then -- ! Assuming anything that has __ClassName comes from save_extra
 					if IgnoreNotArchivable and not instance.Archivable then
 						__DARKLUA_CONTINUE_87 = true
 						break
