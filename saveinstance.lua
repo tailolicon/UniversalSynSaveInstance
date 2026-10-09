@@ -92,29 +92,9 @@ local service = setmetatable({}, {
 })
 
 local sharedStringId = 1e15 -- 1 quadrillion, up to 9.(9) quadrillion, in theory this shouldn't ever run out and be enough for all sharedstrings ever imaginable 	-- TODO: worst case, add fallback to str randomizer once numbers run out : )
--- Xeno's Base64 encoder makes a yielding request. Metamethods cannot yield,
--- so SharedString identifiers must be encoded locally without executor calls.
-local function encodeSharedStringId(raw)
-	local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	local parts = table.create(math.ceil(#raw / 3))
-	for offset = 1, #raw, 3 do
-		local a, b, c = string.byte(raw, offset, offset + 2)
-		local packed = a * 65536 + (b or 0) * 256 + (c or 0)
-		local i1 = math.floor(packed / 262144) % 64 + 1
-		local i2 = math.floor(packed / 4096) % 64 + 1
-		local i3 = math.floor(packed / 64) % 64 + 1
-		local i4 = packed % 64 + 1
-		parts[#parts + 1] = string.sub(alphabet, i1, i1)
-			.. string.sub(alphabet, i2, i2)
-			.. (b and string.sub(alphabet, i3, i3) or "=")
-			.. (c and string.sub(alphabet, i4, i4) or "=")
-	end
-	return table.concat(parts)
-end
-
 local sharedStrings = setmetatable({}, {
 	__index = function(self, str)
-		local id = encodeSharedStringId(tostring(sharedStringId))
+		local id = base64encode(tostring(sharedStringId)) -- tostring is only needed for built-in base64encode, Luau base64 implementations don't need it as buffers autoconvert
 		sharedStringId = sharedStringId + 1
 
 		self[str] = id -- ? The value of the md5 attribute is a Base64-encoded key. <SharedString> type elements use this key to refer to the value of the string. The value is the text content, which is Base64-encoded. Historically, the key was the MD5 hash of the string value. However, this is not required; the key can be any value that will uniquely identify the shared string. Roblox currently uses BLAKE2b truncated to 16 bytes..
@@ -2970,7 +2950,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- * Note: Options are case-insensitive, meaning you can type `NilInstances` option as `nilInStaNces` and it still will be valid.
 --- @within SynSaveInstance
 --- @field __DEBUG_MODE boolean -- This will print debug logs to console about unusual scenarios. Recommended to enable if you wish to help us improve our products and find bugs / issues with it! ___Default:___ false
---- @field ReadMe boolean --___Default:___ false
+--- @field ReadMe boolean -- Disabled in this build; no generated README is exported.
 --- @field SafeMode boolean -- Kicks you before Saving, which keeps you safe. **HIGHLY RECOMMENDED TO KEEP ENABLED**. ___Default:___ true
 --- @field KillAllScripts boolean -- Kills all scripts to further protect you. SafeMode also enables this by default. If you can't move after saving then this is the reason. **HIGHLY RECOMMENDED TO KEEP ENABLED**. ___Default:___ true
 --- @field BoostFPS boolean -- Massively boosts FPS by disabling 3D rendering. Other options also enable it, like: SafeMode. ___Default:___ false
@@ -3067,7 +3047,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 
 local function synsaveinstance(CustomOptions, CustomOptions2)
 	if GLOBAL_ENV.USSI then
-		return false, "Another save is being initialized"
+		return
 	end
 	GLOBAL_ENV.USSI = true
 	-- do -- ? Causes issues on SirHurt (Kick lacking Capability "Consequences"), let threads operate on their default/preferred identity set by the developers
@@ -3079,8 +3059,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local totalsize, chunks = 0, table.create(1)
 	local savebuffer, savebuffer_size = {}, 1
-	local header =
-		'<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4"><External>null</External><External>nil</External><Meta name="ExplicitAutoJoints">true</Meta>'
+	local header = '<roblox version="4">'
 
 	local StatusText
 
@@ -3367,7 +3346,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		warn(text)
 
 		GLOBAL_ENV.USSI = nil
-		return false, text
+		return
 	end
 
 	if OPTIONS.IgnoreDefaultPlayerScripts then
@@ -3555,8 +3534,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		if GLOBAL_ENV[placename] then -- ? AvoidFileOverwrite kinda messes with this, but shouldn't be an issue
 			-- warn("UniversalSynSaveInstance is already saving to this file")
-			GLOBAL_ENV.USSI = nil
-			return false, "This output file is already being saved"
+			return
 		end
 
 		GLOBAL_ENV[placename] = true
@@ -4086,34 +4064,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		wait_for_render() -- ? Needed for at least 1fps (status text)
 	end
 
-	local attributionPatterns = {}
-	for _, attribution in ipairs({
-		"Saved by UniversalSynSaveInstance (Join to Copy Games)",
-		"Thank you for using UniversalSynSaveInstance (Join to Copy Games)",
-	}) do
-		local pattern = string.gsub(attribution, "(%W)", "%%%1")
-		pattern = string.gsub(pattern, "%a", function(letter)
-			return "[" .. string.lower(letter) .. string.upper(letter) .. "]"
-		end)
-		table.insert(attributionPatterns, pattern)
-	end
-
-	local function sanitizeWatermark(value)
-		if type(value) ~= "string" then
-			return value
-		end
-
-		-- Remove only attribution text, never the entire script or its bytecode.
-		-- Keep comment delimiters so block comments and quoted strings stay valid.
-		-- Exporter loader instances are excluded separately in save_hierarchy.
-		for _, pattern in ipairs(attributionPatterns) do
-			value = string.gsub(value, pattern .. "%s*https://discord%.gg/[%w_-]+", "")
-			value = string.gsub(value, pattern, "")
-		end
-
-		return value
-	end
-
 	local function save_specific(className, properties)
 		local Ref = Instance.new(className) -- ! Assuming anything passed here is Creatable
 		local Item = ReturnItem(Ref.ClassName, Ref)
@@ -4124,16 +4074,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			-- TODO: Improve all sort of overrides & exceptions in the code (code below is awful)
 			if propertyName == "Source" then
 				tag = "ProtectedString"
-				value = sanitizeWatermark(val)
-				value = XML_Encoders._protectedString(value)
+				value = XML_Encoders._protectedString(val)
 				whitelisted = true
 			elseif propertyName == "Name" then
 				whitelisted = true
-				local cleanName = sanitizeWatermark(val)
-				if cleanName == "" and val ~= "" then
-					cleanName = "Filtered"
-				end
-				value, tag = ReturnValueAndTag(cleanName, "string") -- * Doubt ValueType will change
+				value, tag = ReturnValueAndTag(val, "string") -- * Doubt ValueType will change
 			end
 
 			if whitelisted then
@@ -4159,19 +4104,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				local ClassName = instance.ClassName
 
 				local InstanceName = instance.Name
-				local LowerInstanceName = string.lower(InstanceName)
 				local SkipEntirely
-
-				if
-					(not OPTIONS.ReadMe and LowerInstanceName == "readme")
-					or (
-						string.find(LowerInstanceName, "loadstring", 1, true)
-						and string.find(LowerInstanceName, "saveinstance", 1, true)
-					)
-				then
-					__DARKLUA_CONTINUE_87 = true
-					break
-				end
 
 				if not ClassTagOverride then -- ! Assuming anything that has __ClassName comes from save_extra
 					if IgnoreNotArchivable and not instance.Archivable then
@@ -4389,14 +4322,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 									end
 								end
 
-								if ValueType == "string" or ValueType == "SharedString" then
-									local cleanValue = sanitizeWatermark(raw)
-									if PropertyName == "Name" and cleanValue == "" and raw ~= "" then
-										cleanValue = "Filtered"
-									end
-									raw = cleanValue
-								end
-
 								local tag, value
 								if Category == "Class" then
 									tag = "Ref"
@@ -4434,7 +4359,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 												if DecompileIgnoring == 1 then
 													DecompileIgnoring = nil
 												end
-												value = ""
+												value = "-- Ignored"
 											else
 												local should_decompile = true
 												local LinkedSource
@@ -4462,7 +4387,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 														end
 														if should_decompile then
 															if DecompileJobless then
-																value = ""
+																value = "-- Not found in LinkedSource ScriptCache"
 																should_decompile = nil
 															end
 
@@ -4509,7 +4434,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 															and instance.RunContext ~= Enum.RunContext.Client
 													then
 														value =
-															"" -- TODO: Could be not just server scripts in the future
+															"-- [FilteringEnabled] Server Scripts are IMPOSSIBLE to save" -- TODO: Could be not just server scripts in the future
 													else
 														value = ldecompile(instance)
 														if SaveBytecode then
@@ -4521,9 +4446,10 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 													end
 												end
 
+												value = (hasLinkedSource and "-- Original Source: https://assetdelivery.roblox.com/v1/asset/?" .. (LinkedSource_type or "id") .. "=" .. (LinkedSource or LinkedSource_Url) .. "\n\n" or "")
+													.. value
 											end
 										end
-										value = sanitizeWatermark(value)
 										value = XML_Encoders._protectedString(value)
 									else
 										--OptionalCoordinateFrame and so on, we make it dynamic
@@ -4628,6 +4554,20 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local function save_game()
+		do
+			if IsModel then
+				--[[
+			-- ? Roblox encodes the following additional attributes. These are not required. Moreover, any defined schemas are ignored, and not required for a file to be valid: xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd"
+			Also http can be converted to https but not sure if Roblox cares
+			-- ? <External>null</External><External>nil</External>  - <External> is a legacy concept that is no longer used.
+		]]
+				header = header .. '<Meta name="ExplicitAutoJoints">true</Meta>'
+			end
+			if writefile and not OPTIONS.Callback then
+				writefile(placename, header) -- TODO This is sort of useless if writefile will be used at the end (like if AlternativeWritefile and Callback are unused)
+			end
+		end
+
 		-- TODO Find a better solution for this
 		SaveNotCreatableWillBeEnabled = SaveNotCreatable
 			or (IsolateLocalPlayer or IsolateLocalPlayerCharacter) and IsolateLocalPlayer
@@ -4668,7 +4608,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			local NilInstancesFixes = OPTIONS.NilInstancesFixes
 
 			for _, instance in next, global_container.getnilinstances() do
-				if instance == game then
+				-- Executor-created loader modules are not part of the game.
+				local name = string.lower(instance.Name)
+				local exporterLoader = instance:IsA("LuaSourceContainer")
+					and string.match(name, "^loadstring:")
+					and string.find(name, "saveinstance", 1, true)
+				if instance == game or exporterLoader then
 					instance = nil
 					-- break
 				else
@@ -4713,8 +4658,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		end
 
-		savebuffer[savebuffer_size] =
-			"</roblox>"
+		savebuffer[savebuffer_size] = "</roblox>"
 		savebuffer_size = savebuffer_size + 1
 		save_cache()
 		do
@@ -4731,8 +4675,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			if Callback then
 				Callback(buildFinalString(chunks), chunks)
 			elseif OPTIONS.AlternativeWritefile and appendfile then
-				-- Start writing only once serialization has completed successfully.
-				writefile(placename, header)
 				local SEGMENT_SIZE = 4145728 -- Celery has an arbitrary savefile/appendfile size limit of ~4MB for reasons unknown. This is a workaround to save the file in segments.
 				local totallen = 0
 				for _, chunk in next, chunks do
@@ -4787,9 +4729,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			connection:Disconnect()
 		end
 		GLOBAL_ENV[placename] = nil
-		if old_gethiddenproperty then
-			gethiddenproperty = old_gethiddenproperty
-		end
 	end
 	do
 		local Players = service.Players
@@ -5117,7 +5056,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					if not base64encode then
 						warn("base64encode not found")
 						Cleanup()
-						return false, "base64encode not found"
+						return
 					end
 				end
 			end
@@ -5129,7 +5068,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					warn("Failed to load the API Dump")
 					warn(result)
 					Cleanup()
-					return false, tostring(result)
+					return
 				end
 			end
 		end
@@ -5157,10 +5096,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 
 		Cleanup()
-		if not ok then
-			warn("Error found while saving:")
-			warn(err)
-		end
 
 		elapse_t = os.clock() - elapse_t
 		local Log10 = math.log10(elapse_t)
@@ -5179,6 +5114,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					end
 					StatusText.Text = "Failed! Check F9 console for more info"
 					StatusText.TextColor3 = Color3.new(1)
+					warn("Error found while saving:")
+					warn(err)
 					task.wait(Log10 + ExtraTime)
 				end
 				StatusText:Destroy()
@@ -5189,7 +5126,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			task.wait(Log10 * 2 + ExtraTime)
 			game:Shutdown()
 		end
-		return ok, err
 	end
 end
 
