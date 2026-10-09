@@ -5149,4 +5149,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 end
 
+-- Support loading this file and then calling saveinstance(options) directly.
+-- Replace the executor's built-in saver in both the shared and current environment.
+GLOBAL_ENV.saveinstance = synsaveinstance
+saveinstance = synsaveinstance
+
 return synsaveinstance
