@@ -92,9 +92,29 @@ local service = setmetatable({}, {
 })
 
 local sharedStringId = 1e15 -- 1 quadrillion, up to 9.(9) quadrillion, in theory this shouldn't ever run out and be enough for all sharedstrings ever imaginable 	-- TODO: worst case, add fallback to str randomizer once numbers run out : )
+-- Xeno's encoder may yield; __index must use a non-yielding encoder for IDs.
+-- SharedString payloads keep the original encoder and serialization path.
+local function encodeSharedStringId(raw)
+	local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	local parts = table.create(math.ceil(#raw / 3))
+	for offset = 1, #raw, 3 do
+		local a, b, c = string.byte(raw, offset, offset + 2)
+		local packed = a * 65536 + (b or 0) * 256 + (c or 0)
+		local i1 = math.floor(packed / 262144) % 64 + 1
+		local i2 = math.floor(packed / 4096) % 64 + 1
+		local i3 = math.floor(packed / 64) % 64 + 1
+		local i4 = packed % 64 + 1
+		parts[#parts + 1] = string.sub(alphabet, i1, i1)
+			.. string.sub(alphabet, i2, i2)
+			.. (b and string.sub(alphabet, i3, i3) or "=")
+			.. (c and string.sub(alphabet, i4, i4) or "=")
+	end
+	return table.concat(parts)
+end
+
 local sharedStrings = setmetatable({}, {
 	__index = function(self, str)
-		local id = base64encode(tostring(sharedStringId)) -- tostring is only needed for built-in base64encode, Luau base64 implementations don't need it as buffers autoconvert
+		local id = encodeSharedStringId(tostring(sharedStringId))
 		sharedStringId = sharedStringId + 1
 
 		self[str] = id -- ? The value of the md5 attribute is a Base64-encoded key. <SharedString> type elements use this key to refer to the value of the string. The value is the text content, which is Base64-encoded. Historically, the key was the MD5 hash of the string value. However, this is not required; the key can be any value that will uniquely identify the shared string. Roblox currently uses BLAKE2b truncated to 16 bytes..
