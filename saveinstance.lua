@@ -92,9 +92,29 @@ local service = setmetatable({}, {
 })
 
 local sharedStringId = 1e15 -- 1 quadrillion, up to 9.(9) quadrillion, in theory this shouldn't ever run out and be enough for all sharedstrings ever imaginable 	-- TODO: worst case, add fallback to str randomizer once numbers run out : )
+-- Xeno's Base64 encoder makes a yielding request. Metamethods cannot yield,
+-- so SharedString identifiers must be encoded locally without executor calls.
+local function encodeSharedStringId(raw)
+	local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	local parts = table.create(math.ceil(#raw / 3))
+	for offset = 1, #raw, 3 do
+		local a, b, c = string.byte(raw, offset, offset + 2)
+		local packed = a * 65536 + (b or 0) * 256 + (c or 0)
+		local i1 = math.floor(packed / 262144) % 64 + 1
+		local i2 = math.floor(packed / 4096) % 64 + 1
+		local i3 = math.floor(packed / 64) % 64 + 1
+		local i4 = packed % 64 + 1
+		parts[#parts + 1] = string.sub(alphabet, i1, i1)
+			.. string.sub(alphabet, i2, i2)
+			.. (b and string.sub(alphabet, i3, i3) or "=")
+			.. (c and string.sub(alphabet, i4, i4) or "=")
+	end
+	return table.concat(parts)
+end
+
 local sharedStrings = setmetatable({}, {
 	__index = function(self, str)
-		local id = base64encode(tostring(sharedStringId)) -- tostring is only needed for built-in base64encode, Luau base64 implementations don't need it as buffers autoconvert
+		local id = encodeSharedStringId(tostring(sharedStringId))
 		sharedStringId = sharedStringId + 1
 
 		self[str] = id -- ? The value of the md5 attribute is a Base64-encoded key. <SharedString> type elements use this key to refer to the value of the string. The value is the text content, which is Base64-encoded. Historically, the key was the MD5 hash of the string value. However, this is not required; the key can be any value that will uniquely identify the shared string. Roblox currently uses BLAKE2b truncated to 16 bytes..
@@ -3047,7 +3067,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 
 local function synsaveinstance(CustomOptions, CustomOptions2)
 	if GLOBAL_ENV.USSI then
-		return
+		return false, "Another save is being initialized"
 	end
 	GLOBAL_ENV.USSI = true
 	-- do -- ? Causes issues on SirHurt (Kick lacking Capability "Consequences"), let threads operate on their default/preferred identity set by the developers
@@ -3347,7 +3367,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		warn(text)
 
 		GLOBAL_ENV.USSI = nil
-		return
+		return false, text
 	end
 
 	if OPTIONS.IgnoreDefaultPlayerScripts then
@@ -3535,7 +3555,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		if GLOBAL_ENV[placename] then -- ? AvoidFileOverwrite kinda messes with this, but shouldn't be an issue
 			-- warn("UniversalSynSaveInstance is already saving to this file")
-			return
+			GLOBAL_ENV.USSI = nil
+			return false, "This output file is already being saved"
 		end
 
 		GLOBAL_ENV[placename] = true
@@ -4609,12 +4630,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local function save_game()
-		do
-			if writefile and not OPTIONS.Callback then
-				writefile(placename, header) -- TODO This is sort of useless if writefile will be used at the end (like if AlternativeWritefile and Callback are unused)
-			end
-		end
-
 		-- TODO Find a better solution for this
 		SaveNotCreatableWillBeEnabled = SaveNotCreatable
 			or (IsolateLocalPlayer or IsolateLocalPlayerCharacter) and IsolateLocalPlayer
@@ -4718,6 +4733,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			if Callback then
 				Callback(buildFinalString(chunks), chunks)
 			elseif OPTIONS.AlternativeWritefile and appendfile then
+				-- Start writing only once serialization has completed successfully.
+				writefile(placename, header)
 				local SEGMENT_SIZE = 4145728 -- Celery has an arbitrary savefile/appendfile size limit of ~4MB for reasons unknown. This is a workaround to save the file in segments.
 				local totallen = 0
 				for _, chunk in next, chunks do
@@ -4772,6 +4789,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			connection:Disconnect()
 		end
 		GLOBAL_ENV[placename] = nil
+		if old_gethiddenproperty then
+			gethiddenproperty = old_gethiddenproperty
+		end
 	end
 	do
 		local Players = service.Players
@@ -5099,7 +5119,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					if not base64encode then
 						warn("base64encode not found")
 						Cleanup()
-						return
+						return false, "base64encode not found"
 					end
 				end
 			end
@@ -5111,7 +5131,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					warn("Failed to load the API Dump")
 					warn(result)
 					Cleanup()
-					return
+					return false, tostring(result)
 				end
 			end
 		end
@@ -5139,6 +5159,10 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 
 		Cleanup()
+		if not ok then
+			warn("Error found while saving:")
+			warn(err)
+		end
 
 		elapse_t = os.clock() - elapse_t
 		local Log10 = math.log10(elapse_t)
@@ -5157,8 +5181,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					end
 					StatusText.Text = "Failed! Check F9 console for more info"
 					StatusText.TextColor3 = Color3.new(1)
-					warn("Error found while saving:")
-					warn(err)
 					task.wait(Log10 + ExtraTime)
 				end
 				StatusText:Destroy()
@@ -5169,6 +5191,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			task.wait(Log10 * 2 + ExtraTime)
 			game:Shutdown()
 		end
+		return ok, err
 	end
 end
 
