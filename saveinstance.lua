@@ -4065,12 +4065,25 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		wait_for_render() -- ? Needed for at least 1fps (status text)
 	end
 
-	local function sanitizeSourceAttribution(value)
+	local function sanitizeWatermark(value)
 		if type(value) ~= "string" then
 			return value
 		end
 
-		-- Do not carry the exporter attribution/watermark into dumped scripts.
+		local lower = string.lower(value)
+		local hasExporterMarker = string.find(lower, "universalsynsaveinstance", 1, true)
+			or string.find(lower, "join to copy games", 1, true)
+		local hasSaveInstanceLoader = string.find(lower, "loadstring", 1, true)
+			and string.find(lower, "saveinstance", 1, true)
+		local hasSaveInstanceUrl = string.find(lower, "raw.githubusercontent.com", 1, true)
+			and string.find(lower, "saveinstance", 1, true)
+
+		-- Do not carry exporter attribution or saveinstance loaders into the dump.
+		-- Returning an empty source also handles modules under Nil Instances.
+		if hasExporterMarker or hasSaveInstanceLoader or hasSaveInstanceUrl then
+			return ""
+		end
+
 		value = string.gsub(
 			value,
 			"Thank you for using UniversalSynSaveInstance %(Join to Copy Games%) https://discord%.gg/[%w_-]+",
@@ -4092,12 +4105,16 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			-- TODO: Improve all sort of overrides & exceptions in the code (code below is awful)
 			if propertyName == "Source" then
 				tag = "ProtectedString"
-				value = sanitizeSourceAttribution(val)
+				value = sanitizeWatermark(val)
 				value = XML_Encoders._protectedString(value)
 				whitelisted = true
 			elseif propertyName == "Name" then
 				whitelisted = true
-				value, tag = ReturnValueAndTag(val, "string") -- * Doubt ValueType will change
+				local cleanName = sanitizeWatermark(val)
+				if cleanName == "" and val ~= "" then
+					cleanName = "Filtered"
+				end
+				value, tag = ReturnValueAndTag(cleanName, "string") -- * Doubt ValueType will change
 			end
 
 			if whitelisted then
@@ -4341,6 +4358,14 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 									end
 								end
 
+								if ValueType == "string" or ValueType == "SharedString" then
+									local cleanValue = sanitizeWatermark(raw)
+									if PropertyName == "Name" and cleanValue == "" and raw ~= "" then
+										cleanValue = "Filtered"
+									end
+									raw = cleanValue
+								end
+
 								local tag, value
 								if Category == "Class" then
 									tag = "Ref"
@@ -4467,7 +4492,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 											end
 										end
-										value = sanitizeSourceAttribution(value)
+										value = sanitizeWatermark(value)
 										value = XML_Encoders._protectedString(value)
 									else
 										--OptionalCoordinateFrame and so on, we make it dynamic
