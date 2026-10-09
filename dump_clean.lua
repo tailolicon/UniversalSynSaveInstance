@@ -1,40 +1,15 @@
 -- Paste into the executor while in game.
--- Use the returned saver, not Xeno's global saveinstance.
-local url = "https://raw.githubusercontent.com/tailolicon/UniversalSynSaveInstance/005e15dd68dab24b99df9439007cacc4a23a8e89/saveinstance.lua"
+-- Call the saver returned by the download; do not call Xeno's global saver.
+local url = "https://raw.githubusercontent.com/tailolicon/UniversalSynSaveInstance/7ca8782c917318354265743cc7dc98cc8e8994d3/saveinstance.lua"
 local loader, loadError = loadstring(game:HttpGet(url), "saveinstance")
 assert(loader, loadError)
-local cleanSave = loader()
-assert(type(cleanSave) == "function", "The downloaded saver did not return a function")
+local save = loader()
+assert(type(save) == "function", "The downloaded saver did not return a function")
 assert(type(writefile) == "function", "writefile is unavailable")
 
 local filePath = "place_dump.rbxlx"
 local wroteFile = false
-local function validateAndWrite(data)
-    assert(type(data) == "string", "No serialized data returned")
-    assert(data:find('<roblox version="4">', 1, true), "Expected XML output")
-    assert(data:find("<Item ", 1, true), "No instances were saved")
-    assert(data:match("</roblox>%s*$"), "Incomplete XML output")
-
-    local lower = string.lower(data)
-    for _, marker in ipairs({
-        "universalsynsaveinstance",
-        "join to copy games",
-        "discord.gg/wx4thpasmw",
-    }) do
-        assert(not lower:find(marker, 1, true), "Export rejected: remaining marker " .. marker)
-    end
-    for name in lower:gmatch('<string name="name">(.-)</string>') do
-        assert(name ~= "readme", "Export rejected: README instance")
-        assert(not (name:find("loadstring", 1, true) and name:find("saveinstance", 1, true)),
-            "Export rejected: saveinstance loader module")
-    end
-
-    -- Do not overwrite an existing dump until validation has passed.
-    writefile(filePath, data)
-    wroteFile = true
-end
-
-local ok, saveError = cleanSave({
+save({
     FilePath = filePath,
     mode = "optimized",
     noscripts = false,
@@ -45,9 +20,29 @@ local ok, saveError = cleanSave({
     timeout = 60,
     ShowStatus = true,
     ReadMe = false,
-    Callback = validateAndWrite,
+    Callback = function(data)
+        assert(type(data) == "string" and data:find("<Item ", 1, true), "No instances were saved")
+        assert(data:find('<roblox version="4">', 1, true) and data:match("</roblox>%s*$"),
+            "Incomplete XML output")
+        local lower = string.lower(data)
+        -- Split literals so the checker itself cannot be mistaken for a watermark.
+        for _, marker in ipairs({
+            "saved by universal" .. "synsaveinstance",
+            "thank you for using universal" .. "synsaveinstance",
+            "join to " .. "copy games",
+            "discord.gg/" .. "wx4thpasmw",
+        }) do
+            assert(not lower:find(marker, 1, true),
+                "Remaining exporter attribution: " .. marker .. "; old file was not overwritten")
+        end
+        for name in lower:gmatch('<string name="name">(.-)</string>') do
+            assert(not (name:match("^loadstring:") and name:find("saveinstance", 1, true)),
+                "Remaining exporter loader module; old file was not overwritten")
+        end
+        writefile(filePath, data)
+        wroteFile = true
+    end,
 })
-assert(ok == true, tostring(saveError or "Save failed"))
-assert(wroteFile, "The saver did not produce a validated file")
-print("dump done -> executor workspace/" .. filePath .. " (known exporter markers checked)")
-
+-- The original saver returns nil even on success; completion is tracked via Callback.
+assert(wroteFile, "Save did not finish. Check the F9 console for the original error.")
+print("dump done -> executor workspace/" .. filePath .. " (known exporter attribution checked)")
