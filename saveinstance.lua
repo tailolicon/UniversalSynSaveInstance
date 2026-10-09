@@ -2950,7 +2950,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- * Note: Options are case-insensitive, meaning you can type `NilInstances` option as `nilInStaNces` and it still will be valid.
 --- @within SynSaveInstance
 --- @field __DEBUG_MODE boolean -- This will print debug logs to console about unusual scenarios. Recommended to enable if you wish to help us improve our products and find bugs / issues with it! ___Default:___ false
---- @field ReadMe boolean --___Default:___ true
+--- @field ReadMe boolean --___Default:___ false
 --- @field SafeMode boolean -- Kicks you before Saving, which keeps you safe. **HIGHLY RECOMMENDED TO KEEP ENABLED**. ___Default:___ true
 --- @field KillAllScripts boolean -- Kills all scripts to further protect you. SafeMode also enables this by default. If you can't move after saving then this is the reason. **HIGHLY RECOMMENDED TO KEEP ENABLED**. ___Default:___ true
 --- @field BoostFPS boolean -- Massively boosts FPS by disabling 3D rendering. Other options also enable it, like: SafeMode. ___Default:___ false
@@ -3104,7 +3104,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		ShutdownWhenDone = false,
 		AntiIdle = true,
 		Anonymous = false,
-		ReadMe = true,
+		ReadMe = false,
 		FilePath = false,
 		AvoidFileOverwrite = true,
 		Object = false,
@@ -4065,6 +4065,23 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		wait_for_render() -- ? Needed for at least 1fps (status text)
 	end
 
+	local function sanitizeSourceAttribution(value)
+		if type(value) ~= "string" then
+			return value
+		end
+
+		-- Do not carry the exporter attribution/watermark into dumped scripts.
+		value = string.gsub(
+			value,
+			"Thank you for using UniversalSynSaveInstance %(Join to Copy Games%) https://discord%.gg/[%w_-]+",
+			""
+		)
+		value = string.gsub(value, "Thank you for using UniversalSynSaveInstance %(Join to Copy Games%)", "")
+		value = string.gsub(value, "Saved by UniversalSynSaveInstance %(Join to Copy Games%)", "")
+
+		return value
+	end
+
 	local function save_specific(className, properties)
 		local Ref = Instance.new(className) -- ! Assuming anything passed here is Creatable
 		local Item = ReturnItem(Ref.ClassName, Ref)
@@ -4075,7 +4092,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			-- TODO: Improve all sort of overrides & exceptions in the code (code below is awful)
 			if propertyName == "Source" then
 				tag = "ProtectedString"
-				value = XML_Encoders._protectedString(val)
+				value = sanitizeSourceAttribution(val)
+				value = XML_Encoders._protectedString(value)
 				whitelisted = true
 			elseif propertyName == "Name" then
 				whitelisted = true
@@ -4449,6 +4467,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 											end
 										end
+										value = sanitizeSourceAttribution(value)
 										value = XML_Encoders._protectedString(value)
 									else
 										--OptionalCoordinateFrame and so on, we make it dynamic
