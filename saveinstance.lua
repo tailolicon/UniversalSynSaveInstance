@@ -4086,32 +4086,30 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		wait_for_render() -- ? Needed for at least 1fps (status text)
 	end
 
+	local attributionPatterns = {}
+	for _, attribution in ipairs({
+		"Saved by UniversalSynSaveInstance (Join to Copy Games)",
+		"Thank you for using UniversalSynSaveInstance (Join to Copy Games)",
+	}) do
+		local pattern = string.gsub(attribution, "(%W)", "%%%1")
+		pattern = string.gsub(pattern, "%a", function(letter)
+			return "[" .. string.lower(letter) .. string.upper(letter) .. "]"
+		end)
+		table.insert(attributionPatterns, pattern)
+	end
+
 	local function sanitizeWatermark(value)
 		if type(value) ~= "string" then
 			return value
 		end
 
-		local lower = string.lower(value)
-		local hasExporterMarker = string.find(lower, "universalsynsaveinstance", 1, true)
-			or string.find(lower, "join to copy games", 1, true)
-		local hasSaveInstanceLoader = string.find(lower, "loadstring", 1, true)
-			and string.find(lower, "saveinstance", 1, true)
-		local hasSaveInstanceUrl = string.find(lower, "raw.githubusercontent.com", 1, true)
-			and string.find(lower, "saveinstance", 1, true)
-
-		-- Do not carry exporter attribution or saveinstance loaders into the dump.
-		-- Returning an empty source also handles modules under Nil Instances.
-		if hasExporterMarker or hasSaveInstanceLoader or hasSaveInstanceUrl then
-			return ""
+		-- Remove only attribution text, never the entire script or its bytecode.
+		-- Keep comment delimiters so block comments and quoted strings stay valid.
+		-- Exporter loader instances are excluded separately in save_hierarchy.
+		for _, pattern in ipairs(attributionPatterns) do
+			value = string.gsub(value, pattern .. "%s*https://discord%.gg/[%w_-]+", "")
+			value = string.gsub(value, pattern, "")
 		end
-
-		value = string.gsub(
-			value,
-			"Thank you for using UniversalSynSaveInstance %(Join to Copy Games%) https://discord%.gg/[%w_-]+",
-			""
-		)
-		value = string.gsub(value, "Thank you for using UniversalSynSaveInstance %(Join to Copy Games%)", "")
-		value = string.gsub(value, "Saved by UniversalSynSaveInstance %(Join to Copy Games%)", "")
 
 		return value
 	end
