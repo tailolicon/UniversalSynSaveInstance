@@ -3951,6 +3951,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				and (category == "Enum" or string_find(result, "Unable to get property " .. propertyName))
 	end
 
+	local unreadablePropertyWarnings = {}
 	local function ReadProperty(instance, property, propertyName, special, category, optional)
 		local raw = __BREAK
 
@@ -3995,7 +3996,18 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		else
 			if CanRead then
-				raw = instance[propertyName]
+				-- Cached readability does not guarantee access on every instance.
+				local ok, result = pcall(index, instance, propertyName)
+				if not ok then
+					local key = instance.ClassName .. "." .. propertyName
+					if not unreadablePropertyWarnings[key] then
+						unreadablePropertyWarnings[key] = true
+						warn("[SaveInstance] Skipping unreadable property " .. key .. ": " .. tostring(result))
+					end
+					-- Do not poison the shared cache for other readable instances.
+					return __BREAK
+				end
+				raw = result
 			else -- Assuming CanRead == nil (untested)
 				local ok, result = pcall(index, instance, propertyName)
 
