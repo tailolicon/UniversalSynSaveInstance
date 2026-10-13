@@ -3015,6 +3015,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field TreatUnionsAsParts boolean -- * **RISKY:** Converts all UnionOperations to Parts. Useful if your Executor isn't able to save (read) Unions, because otherwise they will be invisible. ___Default:___ false (except Solara)
 --- @field DownloadAssets boolean -- Downloads remote assets into a `<file>_assets` folder. Only successfully written assets get local URLs; failed assets keep remote URLs. Copy the asset folder into Studio's `content` directory and inspect `download_report.json` for failures. ___Default:___ true
 --- @field MaxAssets number -- Maximum unique assets to attempt per save. 0 means unlimited; skipped assets keep remote URLs. ___Default:___ 50
+--- @field AssetCacheProbe boolean -- Read-only capability/status diagnostic, writes only `asset_cache_probe.json` and returns without saving a place or downloading assets. ___Default:___ false
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -3068,6 +3069,59 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 ]=]
 
 local function synsaveinstance(CustomOptions, CustomOptions2)
+	-- Explicit diagnostic mode stays inside the same runtime entry file.
+	local probeOptions = type(CustomOptions2) == "table" and CustomOptions2 or CustomOptions
+	if type(probeOptions) == "table" and probeOptions.AssetCacheProbe == true then
+		local report = { version = 1, executor = EXECUTOR_NAME, capabilities = {}, matchingFunctionNames = {}, samples = {} }
+		for _, name in ipairs({ "getcachedasset", "getassetdata", "gettexturedata", "getmeshdata", "getasset",
+			"getspecialinfo", "getcustomasset", "readfile", "listfiles", "gethiddenproperty" }) do
+			report.capabilities[name] = type(GLOBAL_ENV[name]) == "function"
+		end
+		for name, value in next, GLOBAL_ENV do
+			if type(name) == "string" and type(value) == "function" and #report.matchingFunctionNames < 100 then
+				local lower = string.lower(name)
+				if string.find(lower, "asset", 1, true) or string.find(lower, "cache", 1, true)
+					or string.find(lower, "texture", 1, true) or string.find(lower, "mesh", 1, true) then
+					table.insert(report.matchingFunctionNames, name)
+				end
+			end
+		end
+		table.sort(report.matchingFunctionNames)
+		local okPlace, placeId = pcall(function() return game.PlaceId end)
+		if okPlace then report.placeId = placeId end
+		local okProvider, provider = pcall(game.GetService, game, "ContentProvider")
+		local okTree, descendants = pcall(game.GetDescendants, game)
+		if okTree then
+			local seen = {}
+			for i, instance in ipairs(descendants) do
+				if #report.samples >= 10 then break end
+				for _, name in ipairs({ "MeshId", "TextureID", "Texture", "SoundId", "Image", "ColorMap" }) do
+					local readable, value = pcall(function() return instance[name] end)
+					local id = readable and type(value) == "string" and
+						(string.match(value, "^rbxassetid://(%d+)") or string.match(value, "[%?&]id=(%d+)"))
+					if id and not seen[id] and #report.samples < 10 then
+						seen[id] = true
+						local sample = { assetId = id, property = name }
+						if okProvider then
+							local success, status = pcall(function() return provider:GetAssetFetchStatus(value) end)
+							if success then sample.fetchStatus = tostring(status)
+							else sample.statusError = string.sub(tostring(status), 1, 256) end
+						end
+						table.insert(report.samples, sample)
+					end
+				end
+				if i % 250 == 0 then task.wait() end
+			end
+		else report.treeError = string.sub(tostring(descendants), 1, 256) end
+		report.note = "No unknown asset/cache functions invoked; getcustomasset is not evidence of cache export support. No place saved or assets downloaded."
+		local encoded, json = pcall(function() return service.HttpService:JSONEncode(report) end)
+		if encoded then
+			local saved, err = pcall(writefile, "asset_cache_probe.json", json)
+			if not saved or err == false then warn("[AssetCacheProbe] Cannot write report: " .. tostring(err)) end
+			print("[AssetCacheProbe] " .. json)
+		else warn("[AssetCacheProbe] Cannot encode report: " .. tostring(json)) end
+		return report
+	end
 	if GLOBAL_ENV.USSI then
 		return
 	end
