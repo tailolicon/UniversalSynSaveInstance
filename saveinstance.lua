@@ -3013,6 +3013,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field IgnoreSharedStrings boolean -- * **RISKY**: Might help with crashes on some executors. ___Default:___ false
 --- @field SharedStringOverwrite boolean -- * **RISKY:** if the process is not finished aka crashed then none of the affected values will be available. SharedStrings can also be used for ValueTypes that aren't `SharedString`, this behavior is not documented anywhere but makes sense (Could create issues though, due to _potential_ ValueType mix-up, only works on certain types which are all base64 encoded so far). Reason: Allows for potential smaller file size (can also be bigger in some cases). ___Default:___ false
 --- @field TreatUnionsAsParts boolean -- * **RISKY:** Converts all UnionOperations to Parts. Useful if your Executor isn't able to save (read) Unions, because otherwise they will be invisible. ___Default:___ false (except Solara)
+--- @field DownloadAssets boolean -- * Downloads remote assets (images, meshes, sounds, animations, etc.) referenced by the place into a `<file>_assets` folder inside your executor's workspace, then rewrites all Content URLs to `rbxasset://<file>_assets/...` so the place loads fully OFFLINE in Studio. To make Studio find the files, copy/move the folder into Studio's `content` directory (next to RobloxStudioBeta.exe) or just run the INSTALL_ASSETS.bat inside the folder. ___Default:___ true
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -3106,6 +3107,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		},
 		IgnoreDefaultPlayerScripts = true,
 		SaveBytecode = false,
+		DownloadAssets = true,
 
 		IgnoreProperties = {},
 
@@ -3469,7 +3471,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local ldeccache = GLOBAL_ENV.USSI_scriptcache
 
-	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, SaveNotCreatableWillBeEnabled, RecoveredScripts
+	local DecompileIgnoring, ToSaveList, ldecompile, placename, elapse_t, SaveNotCreatableWillBeEnabled, RecoveredScripts, assets_dir, assets_basename
 
 	if OPTIONS.ReadMe then
 		RecoveredScripts = {}
@@ -3559,6 +3561,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 		GLOBAL_ENV[placename] = true
 		GLOBAL_ENV.USSI = nil
+
+		assets_dir = (string.match(placename, "(.+)%.[^%.]+$") or placename) .. "_assets"
+		assets_basename = string.match(assets_dir, "[^/\\]+$") or assets_dir
 
 		if mode ~= "scripts" then
 			IgnorePropertiesOfNotScriptsOnScriptsMode = nil
@@ -4664,6 +4669,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			save_extra("Nil Instances", nil_instances)
 		end
 
+
 		do
 			local tmp = { "<SharedStrings>" }
 			for value, id in next, sharedStrings do
@@ -4681,6 +4687,392 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		savebuffer[savebuffer_size] = "</roblox>"
 		savebuffer_size = savebuffer_size + 1
 		save_cache()
+
+		if OPTIONS.DownloadAssets then
+			if not writefile then
+				warn("[DownloadAssets] writefile is unavailable; keeping remote asset URLs")
+			else
+				local ok, err = pcall(function()
+					local http_request = (syn and syn.request)
+						or (http and http.request)
+						or request
+						or http_request
+						or (fluxus and fluxus.request)
+
+					local function raw_http_get(url)
+						if http_request then
+							local success, res = pcall(http_request, {
+								Url = url,
+								Method = "GET",
+								Headers = { ["User-Agent"] = "Roblox/WinInet" },
+							})
+							if
+								success
+								and type(res) == "table"
+								and type(res.Body) == "string"
+								and #res.Body > 8
+								and (res.StatusCode == nil or res.StatusCode < 400)
+							then
+								return res.Body
+							end
+						end
+						local success, body = pcall(game.HttpGet, game, url, true)
+						if success and type(body) == "string" and #body > 8 then
+							return body
+						end
+					end
+
+					local function http_get(url)
+						local done, result = false, nil
+						task.spawn(function()
+							result = raw_http_get(url)
+							done = true
+						end)
+						local start = os.clock()
+						while not done and os.clock() - start < 20 do
+							task.wait(0.05)
+						end
+						return result
+					end
+
+					local function looks_like_error(body)
+						if not body or #body <= 8 then
+							return true
+						end
+						local head = string.sub(body, 1, 400)
+						return not not (
+							string_find(head, '"errors"')
+							or string_find(head, "<Error")
+							or string_find(head, "AccessDenied")
+							or string_find(head, "<html")
+						)
+					end
+
+					local function sniff_ext(body)
+						if string.sub(body, 1, 8) == "\137PNG\r\n\026\n" then
+							return ".png"
+						elseif string.sub(body, 1, 3) == "\255\216\255" then
+							return ".jpg"
+						elseif string.sub(body, 1, 4) == "OggS" then
+							return ".ogg"
+						elseif string.sub(body, 1, 3) == "ID3" or string.byte(body) == 0xFF then
+							return ".mp3"
+						elseif string.sub(body, 1, 4) == "RIFF" then
+							return ".wav"
+						elseif string.match(body, "^version") then
+							return ".mesh"
+						elseif string.sub(body, 1, 8) == "<roblox!" then
+							return ".rbxm"
+						elseif string.match(body, "^%s*<") then
+							return ".rbxmx"
+						elseif string.sub(body, 5, 8) == "ftyp" then
+							return ".mp4"
+						elseif string.sub(body, 1, 4) == "\0\1\0\0" or string.sub(body, 1, 4) == "OTTO" then
+							return ".ttf"
+						elseif string.sub(body, 1, 1) == "{" then
+							return ".json"
+						end
+						return ".bin"
+					end
+
+					local HttpRbxApiService = service.HttpRbxApiService
+					local function rbx_http_get(url)
+						-- * Goes through the client's OWN authenticated networking, so it can fetch
+						-- * private/restricted assets that the game itself is able to load
+						if not HttpRbxApiService then
+							return
+						end
+						local ok, body = pcall(HttpRbxApiService.GetAsync, HttpRbxApiService, url)
+						if not ok or type(body) ~= "string" then
+							ok, body = pcall(
+								HttpRbxApiService.GetAsync,
+								HttpRbxApiService,
+								url,
+								Enum.ThrottlingPriority.Default,
+								Enum.HttpRequestType.Default
+							)
+						end
+						if ok and type(body) == "string" and #body > 8 then
+							return body
+						end
+					end
+
+					local function fetch_asset_id(id, depth)
+						-- * Catalog-style assets (Decal/Texture/Shirt/Pants) deliver a .rbxmx wrapper that points at the real file
+						local function unwrap_or_keep(body)
+							if
+								(depth or 0) == 0
+								and string.match(body, "^%s*<")
+								and (
+									string_find(body, 'class="Decal"')
+									or string_find(body, 'class="Texture"')
+									or string_find(body, 'class="Shirt"')
+									or string_find(body, 'class="Pants"')
+									or string_find(body, 'class="ShirtGraphic"')
+								)
+							then
+								local inner = string.match(body, "rbxassetid://(%d+)")
+									or string.match(body, "[%?&]id=(%d+)")
+								if inner and inner ~= id then
+									return fetch_asset_id(inner, 1) or body
+								end
+							end
+							return body
+						end
+
+						for _, host in next, { "assetdelivery.roblox.com", "assetdelivery.roproxy.com" } do
+							local body = http_get("https://" .. host .. "/v1/asset?id=" .. id)
+							if body and not looks_like_error(body) then
+								return unwrap_or_keep(body)
+							end
+						end
+
+						local body = rbx_http_get("https://assetdelivery.roblox.com/v1/asset?id=" .. id)
+						if body and not looks_like_error(body) then
+							return unwrap_or_keep(body)
+						end
+					end
+
+					local thumb_types = {
+						Asset = "/v1/assets?assetIds=%s&size=%sx%s&format=Png&isCircular=false",
+						Avatar = "/v1/users/avatar?userIds=%s&size=%sx%s&format=Png&isCircular=false",
+						AvatarHeadShot = "/v1/users/avatar-headshot?userIds=%s&size=%sx%s&format=Png&isCircular=false",
+						GameIcon = "/v1/games/icons?universeIds=%s&size=%sx%s&format=Png&isCircular=false",
+						GameThumbnail = "/v1/games/thumbnails?universeIds=%s&size=%sx%s&format=Png&isCircular=false",
+						GamePass = "/v1/game-passes?gamePassIds=%s&size=%sx%s&format=Png&isCircular=false",
+						BadgeIcon = "/v1/badges/icons?badgeIds=%s&size=%sx%s&format=Png&isCircular=false",
+					}
+					local function fetch_thumb(thumbType, id, w, h)
+						local path = thumb_types[thumbType] or thumb_types.Asset
+						for _, host in next, { "thumbnails.roblox.com", "thumbnails.roproxy.com" } do
+							local url = "https://" .. host .. string.format(path, id, w, h)
+							for _, getter in next, { http_get, rbx_http_get } do
+								local meta = getter(url)
+								if meta and not looks_like_error(meta) then
+									local ok2, decoded =
+										pcall(service.HttpService.JSONDecode, service.HttpService, meta)
+									local data1 = ok2 and decoded and decoded.data and decoded.data[1]
+									local imageUrl = type(data1) == "table" and data1.imageUrl
+									if imageUrl then
+										local body = http_get(imageUrl)
+										if body and not looks_like_error(body) then
+											return body
+										end
+									end
+								end
+							end
+						end
+					end
+
+					local function resolve(url)
+						local id = string.match(url, "^rbxassetid://(%d+)")
+							or string.match(url, "^rbxhttp://asset/*%?id=(%d+)")
+							or string.match(url, "^https*://[%w%.%-]*roblox%.com/.*[%?&]id=(%d+)")
+						if id then
+							return "asset_" .. id, function()
+								return fetch_asset_id(id)
+							end
+						end
+
+						local thumbType, tid, w, h = string.match(url, "^rbxthumb://type=(%w+)&id=(%d+)&w=(%d+)&h=(%d+)")
+						if thumbType then
+							return "thumb_" .. thumbType .. "_" .. tid .. "_" .. w .. "x" .. h, function()
+								return fetch_thumb(thumbType, tid, w, h)
+							end
+						end
+
+						if
+							string.match(url, "^https*://")
+							and (string_find(url, "roblox.com") or string_find(url, "roproxy.com") or string_find(
+								url,
+								"rbxcdn.com"
+							))
+						then
+							local name = string.match(url, "([%w%-%._]+)%?")
+								or string.match(url, "([%w%-%._]+)/*$")
+								or "asset"
+							return "web_" .. string.gsub(name, "[^%w%-%._]", "_"), function()
+								local body = http_get(url)
+								if not body or looks_like_error(body) then
+									body = rbx_http_get(url)
+								end
+								if body and not looks_like_error(body) then
+									return body
+								end
+							end
+						end
+					end
+
+					local named_escapes = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'" }
+					local function xml_unescape(s)
+						s = string.gsub(s, "&#(%d+);", function(n)
+							return string.char(tonumber(n) % 256)
+						end)
+						return (string.gsub(s, "&(%w+);", named_escapes))
+					end
+
+					local xml = table.concat(chunks)
+
+					local urltail = "[%w%%&;=%-_%.~/:?+]"
+					local url_to_key, wanted = {}, {}
+					local function register(url)
+						if url == "" or url_to_key[url] ~= nil then
+							return
+						end
+						local key, fetcher = resolve(url)
+						url_to_key[url] = key or false
+						if key then
+							if not wanted[key] then
+								wanted[key] = { fetch = fetcher }
+							end
+						end
+					end
+
+					for u in string.gmatch(xml, "<url>([^<]*)</url>") do
+						register(xml_unescape(u))
+					end
+					for u in string.gmatch(xml, "<uri>([^<]*)</uri>") do
+						register(xml_unescape(u))
+					end
+					for u in string.gmatch(xml, "rbxassetid://%d+" .. urltail .. "*") do
+						register(xml_unescape(u))
+					end
+					for u in string.gmatch(xml, "rbxthumb://" .. urltail .. "+") do
+						register(xml_unescape(u))
+					end
+					for u in string.gmatch(xml, "rbxhttp://" .. urltail .. "+") do
+						register(xml_unescape(u))
+					end
+					for u in string.gmatch(xml, "https*://[%w%.%-]*roblox%.com/" .. urltail .. "*") do
+						register(xml_unescape(u))
+					end
+					for u in string.gmatch(xml, "https*://[%w%.%-]*rbxcdn%.com/" .. urltail .. "*") do
+						register(xml_unescape(u))
+					end
+
+					local keys = {}
+					for key in next, wanted do
+						keys[#keys + 1] = key
+					end
+					local total = #keys
+
+					if total > 0 then
+						if makefolder then
+							pcall(makefolder, assets_dir)
+						end
+
+						local results, failed = {}, 0
+						local url_map = {}
+						for i, key in ipairs(keys) do
+							if StatusText then
+								StatusText.Text = "Downloading Assets " .. i .. "/" .. total .. " (" .. key .. ")"
+							end
+							local body = wanted[key].fetch()
+							if body and not looks_like_error(body) then
+								local fname = key .. sniff_ext(body)
+								if pcall(writefile, assets_dir .. "/" .. fname, body) then
+									results[key] = "rbxasset://" .. assets_basename .. "/" .. fname
+								end
+							end
+							if not results[key] then
+								failed = failed + 1
+							end
+							if i >= 3 and failed == i then
+								break -- * Everything failing, most likely no network - bail early
+							end
+							if i % 4 == 0 then
+								wait_for_render()
+							end
+						end
+
+						local function replacement(url_raw)
+							local key = url_to_key[url_raw]
+							if not key then
+								key = (resolve(url_raw)) or false
+							end
+							return key and results[key] or nil
+						end
+
+						xml = string.gsub(xml, "(<url>)([^<]*)(</url>)", function(a, u, b)
+							return a .. (replacement(xml_unescape(u)) or u) .. b
+						end)
+						xml = string.gsub(xml, "(<uri>)([^<]*)(</uri>)", function(a, u, b)
+							return a .. (replacement(xml_unescape(u)) or u) .. b
+						end)
+						for _, pat in next, {
+							"rbxassetid://%d+" .. urltail .. "*",
+							"rbxthumb://" .. urltail .. "+",
+							"rbxhttp://" .. urltail .. "+",
+							"https*://[%w%.%-]*roblox%.com/" .. urltail .. "*",
+							"https*://[%w%.%-]*rbxcdn%.com/" .. urltail .. "*",
+						} do
+							xml = string.gsub(xml, pat, function(u)
+								return replacement(xml_unescape(u)) or u
+							end)
+						end
+
+						chunks = { xml }
+
+						local written = 0
+						for url, key in next, url_to_key do
+							if key and results[key] then
+								written = written + 1
+								url_map[url] = results[key]
+							end
+						end
+
+						pcall(function()
+							writefile(
+								assets_dir .. "/assets_map.json",
+								service.HttpService:JSONEncode(url_map)
+							)
+							writefile(
+								assets_dir .. "/INSTALL_ASSETS.bat",
+								table.concat({
+									"@echo off",
+									"setlocal enabledelayedexpansion",
+									'set "SRC=%~dp0"',
+									'for %%I in ("%SRC%.") do set "NAME=%%~nxI"',
+									'set "STUDIO="',
+									'for /d %%D in ("%LOCALAPPDATA%\\Roblox\\Versions\\version-*") do (',
+									'  if exist "%%D\\RobloxStudioBeta.exe" set "STUDIO=%%D"',
+									")",
+									'if not defined STUDIO for /d %%D in ("C:\\Program Files (x86)\\Roblox\\Versions\\version-*") do (',
+									'  if exist "%%D\\RobloxStudioBeta.exe" set "STUDIO=%%D"',
+									")",
+									"if not defined STUDIO (",
+									"  echo Roblox Studio was not found automatically.",
+									'  echo Manually copy the "%NAME%" folder into the "content" folder next to RobloxStudioBeta.exe',
+									"  pause",
+									"  exit /b 1",
+									")",
+									'xcopy "%SRC%*" "%STUDIO%\\content\\%NAME%\\" /E /I /Y',
+									'echo Done. Assets were copied to %STUDIO%\\content\\%NAME%',
+									"pause",
+								}, "\r\n")
+							)
+						end)
+
+						if StatusText then
+							StatusText.Text = "Assets: " .. written .. " saved, " .. failed .. " failed"
+						end
+						warn(
+							"[DownloadAssets] "
+								.. written
+								.. " URLs rewritten, assets stored in '"
+								.. assets_dir
+								.. "' (move it into Studio's content folder or run INSTALL_ASSETS.bat). "
+								.. failed
+								.. " asset(s) failed and kept remote URLs"
+						)
+					end
+				end)
+				if not ok then
+					warn("[DownloadAssets] failed: " .. tostring(err))
+				end
+			end
+		end
+
 		do
 			local function buildFinalString(chunks)
 				local parts = table.create(#chunks + 1)
