@@ -3014,6 +3014,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field SharedStringOverwrite boolean -- * **RISKY:** if the process is not finished aka crashed then none of the affected values will be available. SharedStrings can also be used for ValueTypes that aren't `SharedString`, this behavior is not documented anywhere but makes sense (Could create issues though, due to _potential_ ValueType mix-up, only works on certain types which are all base64 encoded so far). Reason: Allows for potential smaller file size (can also be bigger in some cases). ___Default:___ false
 --- @field TreatUnionsAsParts boolean -- * **RISKY:** Converts all UnionOperations to Parts. Useful if your Executor isn't able to save (read) Unions, because otherwise they will be invisible. ___Default:___ false (except Solara)
 --- @field DownloadAssets boolean -- Downloads remote assets into a `<file>_assets` folder. Only successfully written assets get local URLs; failed assets keep remote URLs. Copy the asset folder into Studio's `content` directory and inspect `download_report.json` for failures. ___Default:___ true
+--- @field MaxAssets number -- Maximum unique assets to attempt per save. 0 means unlimited; skipped assets keep remote URLs. ___Default:___ 50
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -3108,6 +3109,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		IgnoreDefaultPlayerScripts = true,
 		SaveBytecode = false,
 		DownloadAssets = true,
+		MaxAssets = 50,
 
 		IgnoreProperties = {},
 
@@ -4983,6 +4985,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						keys[#keys + 1] = key
 					end
 					local total = #keys
+					local maxAssets = tonumber(OPTIONS.MaxAssets) or 50
+					if maxAssets ~= maxAssets then maxAssets = 50 end
+					local attemptLimit = maxAssets > 0 and math.min(total, math.floor(maxAssets)) or total
 
 					if total > 0 then
 						local function safe_write(path, data)
@@ -5007,11 +5012,14 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 						table.sort(keys)
 						local results, failed, downloaded = {}, 0, 0
+						local attempted = 0
 						local url_map, failure_details = {}, {}
 						for i, key in ipairs(keys) do
+						    if i > attemptLimit then break end
 						    current_attempts = {}
 						    if StatusText then
-						        StatusText.Text = "Downloading Assets " .. i .. "/" .. total .. " (" .. key .. ")"
+						        StatusText.Text = "Downloading Assets " .. i .. "/" .. attemptLimit
+						            .. " | saved " .. downloaded .. " | failed " .. failed .. " (" .. key .. ")"
 						    end
 						    local fetched, body = pcall(wanted[key].fetch)
 						    if not fetched then
@@ -5025,6 +5033,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						        if stored then
 						            results[key] = "rbxasset://" .. assets_basename .. "/" .. fname
 						            downloaded = downloaded + 1
+						            warn("[DownloadAssets] SAVED " .. key .. " (" .. #body .. " bytes; file verified)")
 						        else
 						            record_attempt("writefile/readfile", path, storeError)
 						        end
@@ -5038,7 +5047,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						        local last = current_attempts[#current_attempts]
 						        warn("[DownloadAssets] FAILED " .. key .. " [" .. last.route .. "]: " .. last.error)
 						    end
-						    -- Do not infer that all remaining assets are unavailable from three failures.
+						    attempted = attempted + 1
+						    if StatusText then
+						        StatusText.Text = "Assets " .. attempted .. "/" .. attemptLimit
+						            .. " | saved " .. downloaded .. " | failed " .. failed
+						    end
+						    -- Only stop at the requested limit, not after consecutive failures.
 						    if i % 4 == 0 then wait_for_render() end
 						end
 
@@ -5093,7 +5107,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						write_metadata("assets_map.json", url_map)
 						write_metadata("download_report.json", {
 						    total = total,
-						    attempted = total,
+						    attempted = attempted,
+						    skipped = total - attempted,
+						    limit = attemptLimit,
 						    downloadedFiles = downloaded,
 						    rewrittenUrls = written,
 						    failed = failed,
@@ -5101,7 +5117,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						})
 
 						if StatusText then
-							StatusText.Text = "Assets: " .. written .. " saved, " .. failed .. " failed"
+							StatusText.Text = "Assets: " .. downloaded .. " saved, " .. failed .. " failed, " .. (total - attempted) .. " skipped"
 						end
 						warn(
 							"[DownloadAssets] "
@@ -5110,7 +5126,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 								.. assets_dir
 								.. "' (copy it into Studio's content folder; see download_report.json). "
 								.. failed
-								.. " asset(s) failed and kept remote URLs"
+								.. " asset(s) failed and kept remote URLs; " .. (total - attempted)
+								.. " skipped. Downloaded files: " .. downloaded .. "/" .. attempted
 						)
 					end
 				end)
