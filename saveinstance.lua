@@ -3016,6 +3016,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field DownloadAssets boolean -- Downloads remote assets into a `<file>_assets` folder. Only successfully written assets get local URLs; failed assets keep remote URLs. Copy the asset folder into Studio's `content` directory and inspect `download_report.json` for failures. ___Default:___ true
 --- @field MaxAssets number -- Maximum unique assets to attempt per save. 0 means unlimited; skipped assets keep remote URLs. ___Default:___ 50
 --- @field AssetCacheProbe boolean -- Read-only capability/status diagnostic, writes only `asset_cache_probe.json` and returns without saving a place or downloading assets. ___Default:___ false
+--- @field AssetReflectionProbe boolean -- With AssetCacheProbe, opt in to Xeno property/method-name enumeration on ContentProvider and one MeshPart. Returned methods are never invoked. ___Default:___ false
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -3113,6 +3114,59 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		if okPlace then report.placeId = placeId end
 		local okProvider, provider = pcall(game.GetService, game, "ContentProvider")
 		local okTree, descendants = pcall(game.GetDescendants, game)
+		if probeOptions.AssetReflectionProbe == true then
+			report.version = 3
+			report.reflection = {}
+			local xeno = rawget(GLOBAL_ENV, "Xeno")
+			local targets = {}
+			if okProvider then table.insert(targets, { label = "ContentProvider", instance = provider }) end
+			if okTree then
+				for _, instance in ipairs(descendants) do
+					local ok, mesh = pcall(function() return instance:IsA("MeshPart") end)
+					if ok and mesh then
+						table.insert(targets, { label = "FirstMeshPart", instance = instance })
+						break
+					end
+				end
+			end
+			for _, target in ipairs(targets) do
+				for _, name in ipairs({ "getproperties", "getinstancefunctions" }) do
+					local entry = { target = target.label, method = name, names = {} }
+					local fn = type(xeno) == "table" and rawget(xeno, name)
+					entry.available = type(fn) == "function"
+					if entry.available then
+						local ok, result = pcall(fn, target.instance)
+						entry.success = ok
+						entry.resultType = type(result)
+						if ok and type(result) == "table" then
+							local count, seen = 0, {}
+							local function addName(value)
+								if type(value) == "string" and #value <= 100
+									and string.match(value, "^[%a_][%w_]*$") and not seen[value] then
+									seen[value] = true
+									table.insert(entry.names, value)
+								end
+							end
+							for key, value in next, result do
+								count += 1
+								if count > 512 then entry.truncated = true break end
+								addName(key)
+								if type(key) == "number" then
+									addName(value)
+									if type(value) == "table" then
+										addName(rawget(value, "Name"))
+										addName(rawget(value, "name"))
+									end
+								end
+							end
+							entry.inspectedEntries = math.min(count, 512)
+							table.sort(entry.names)
+						end
+					end
+					table.insert(report.reflection, entry)
+				end
+			end
+		end
 		if okTree then
 			local seen = {}
 			for i, instance in ipairs(descendants) do
@@ -3135,7 +3189,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				if i % 250 == 0 then task.wait() end
 			end
 		else report.treeError = string.sub(tostring(descendants), 1, 256) end
-		report.note = "No unknown asset/cache functions invoked; getcustomasset is not evidence of cache export support. No place saved or assets downloaded."
+		report.note = probeOptions.AssetReflectionProbe == true
+			and "Opt-in reflection calls only; returned methods are not invoked, only identifier names recorded. No place saved or assets downloaded."
+			or "No unknown asset/cache functions invoked; getcustomasset is not evidence of cache export support. No place saved or assets downloaded."
 		local encoded, json = pcall(function() return service.HttpService:JSONEncode(report) end)
 		if encoded then
 			local saved, err = pcall(writefile, "asset_cache_probe.json", json)
