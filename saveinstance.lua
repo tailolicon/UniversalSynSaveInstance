@@ -3072,7 +3072,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	-- Explicit diagnostic mode stays inside the same runtime entry file.
 	local probeOptions = type(CustomOptions2) == "table" and CustomOptions2 or CustomOptions
 	if type(probeOptions) == "table" and probeOptions.AssetCacheProbe == true then
-		local report = { version = 1, executor = EXECUTOR_NAME, capabilities = {}, matchingFunctionNames = {}, samples = {} }
+		local report = { version = 2, executor = EXECUTOR_NAME, capabilities = {}, matchingFunctionNames = {}, namespaceFunctionNames = {}, samples = {} }
 		for _, name in ipairs({ "getcachedasset", "getassetdata", "gettexturedata", "getmeshdata", "getasset",
 			"getspecialinfo", "getcustomasset", "readfile", "listfiles", "gethiddenproperty" }) do
 			report.capabilities[name] = type(GLOBAL_ENV[name]) == "function"
@@ -3087,6 +3087,28 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		end
 		table.sort(report.matchingFunctionNames)
+		-- Inventory only: use raw access and never invoke namespace functions.
+		-- The first probe could miss APIs exposed under Xeno rather than globals.
+		local visited = {}
+		local function inspectNamespace(namespace, prefix, depth)
+			if type(namespace) ~= "table" or visited[namespace] then return end
+			visited[namespace] = true
+			for name, value in next, namespace do
+				if #report.namespaceFunctionNames >= 200 then break end
+				if type(name) == "string" and #name <= 100 then
+					local path = prefix .. "." .. name
+					if type(value) == "function" then
+						table.insert(report.namespaceFunctionNames, path)
+					elseif type(value) == "table" and depth < 2 then
+						inspectNamespace(value, path, depth + 1)
+					end
+				end
+			end
+		end
+		for _, name in ipairs({ "Xeno", "xeno", "syn", "cache" }) do
+			inspectNamespace(rawget(GLOBAL_ENV, name), name, 0)
+		end
+		table.sort(report.namespaceFunctionNames)
 		local okPlace, placeId = pcall(function() return game.PlaceId end)
 		if okPlace then report.placeId = placeId end
 		local okProvider, provider = pcall(game.GetService, game, "ContentProvider")
