@@ -3013,7 +3013,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field IgnoreSharedStrings boolean -- * **RISKY**: Might help with crashes on some executors. ___Default:___ false
 --- @field SharedStringOverwrite boolean -- * **RISKY:** if the process is not finished aka crashed then none of the affected values will be available. SharedStrings can also be used for ValueTypes that aren't `SharedString`, this behavior is not documented anywhere but makes sense (Could create issues though, due to _potential_ ValueType mix-up, only works on certain types which are all base64 encoded so far). Reason: Allows for potential smaller file size (can also be bigger in some cases). ___Default:___ false
 --- @field TreatUnionsAsParts boolean -- * **RISKY:** Converts all UnionOperations to Parts. Useful if your Executor isn't able to save (read) Unions, because otherwise they will be invisible. ___Default:___ false (except Solara)
---- @field DownloadAssets boolean -- * Downloads remote assets (images, meshes, sounds, animations, etc.) referenced by the place into a `<file>_assets` folder inside your executor's workspace, then rewrites all Content URLs to `rbxasset://<file>_assets/...` so the place loads fully OFFLINE in Studio. To make Studio find the files, copy/move the folder into Studio's `content` directory (next to RobloxStudioBeta.exe) or just run the INSTALL_ASSETS.bat inside the folder. ___Default:___ true
+--- @field DownloadAssets boolean -- Downloads remote assets into a `<file>_assets` folder. Only successfully written assets get local URLs; failed assets keep remote URLs. Copy the asset folder into Studio's `content` directory and inspect `download_report.json` for failures. ___Default:___ true
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -4699,53 +4699,76 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						or http_request
 						or (fluxus and fluxus.request)
 
-					local function raw_http_get(url)
-						if http_request then
-							local success, res = pcall(http_request, {
-								Url = url,
-								Method = "GET",
-								Headers = { ["User-Agent"] = "Roblox/WinInet" },
-							})
-							if
-								success
-								and type(res) == "table"
-								and type(res.Body) == "string"
-								and #res.Body > 8
-								and (res.StatusCode == nil or res.StatusCode < 400)
-							then
-								return res.Body
-							end
-						end
-						local success, body = pcall(game.HttpGet, game, url, true)
-						if success and type(body) == "string" and #body > 8 then
-							return body
-						end
+					local current_attempts = {}
+					local function record_attempt(route, target, detail, attempts)
+					    table.insert(attempts or current_attempts, {
+					        route = route,
+					        target = target,
+					        error = string.sub(tostring(detail), 1, 512),
+					    })
+					end
+
+					local function raw_http_get(url, attempts)
+					    if http_request then
+					        local success, res = pcall(http_request, {
+					            Url = url,
+					            Method = "GET",
+					            Headers = { ["User-Agent"] = "Roblox/WinInet" },
+					        })
+					        local status = success and type(res) == "table" and tonumber(res.StatusCode or res.Status) or nil
+					        local body = success and type(res) == "table" and res.Body or nil
+					        if type(body) == "string" and #body > 8
+					            and (status == nil or (status >= 200 and status < 300))
+					        then
+					            return body
+					        end
+					        record_attempt("request", url,
+					            not success and res or ("HTTP " .. tostring(status or "unknown")
+					                .. "; body bytes=" .. tostring(type(body) == "string" and #body or 0)), attempts)
+					    end
+					    local success, body = pcall(game.HttpGet, game, url, true)
+					    if success and type(body) == "string" and #body > 8 then
+					        return body
+					    end
+					    record_attempt("game.HttpGet", url,
+					        not success and body or "Missing/short response body", attempts)
 					end
 
 					local function http_get(url)
-						local done, result = false, nil
-						task.spawn(function()
-							result = raw_http_get(url)
-							done = true
-						end)
-						local start = os.clock()
-						while not done and os.clock() - start < 20 do
-							task.wait(0.05)
-						end
-						return result
+					    local done, result = false, nil
+					    local attempts = current_attempts
+					    local worker = task.spawn(function()
+					        local success, body = pcall(raw_http_get, url, attempts)
+					        if success then result = body
+					        else record_attempt("HTTP callback", url, body, attempts) end
+					        done = true
+					    end)
+					    local start = os.clock()
+					    while not done and os.clock() - start < 20 do
+					        task.wait(0.05)
+					    end
+					    if not done then
+					        record_attempt("HTTP timeout", url, "Exceeded 20 seconds", attempts)
+					        if worker and task.cancel then pcall(task.cancel, worker) end
+					        return nil
+					    end
+					    return result
 					end
 
 					local function looks_like_error(body)
-						if not body or #body <= 8 then
-							return true
-						end
-						local head = string.sub(body, 1, 400)
-						return not not (
-							string_find(head, '"errors"')
-							or string_find(head, "<Error")
-							or string_find(head, "AccessDenied")
-							or string_find(head, "<html")
-						)
+					    if type(body) ~= "string" or #body <= 8 then
+					        return true
+					    end
+					    local head = string.lower(string.sub(body, 1, 400))
+					    local errorBody = string_find(head, '"errors"')
+					        or string_find(head, "<error")
+					        or string_find(head, "accessdenied")
+					        or string_find(head, "<html")
+					        or string_find(head, "<!doctype html")
+					    if errorBody then
+					        record_attempt("response validation", "", "Server returned an API/HTML error, not asset content")
+					    end
+					    return not not errorBody
 					end
 
 					local function sniff_ext(body)
@@ -4775,26 +4798,31 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						return ".bin"
 					end
 
-					local HttpRbxApiService = service.HttpRbxApiService
+					local HttpRbxApiService
+					local apiAvailable, apiError = pcall(function()
+					    HttpRbxApiService = service.HttpRbxApiService
+					end)
 					local function rbx_http_get(url)
-						-- * Goes through the client's OWN authenticated networking, so it can fetch
-						-- * private/restricted assets that the game itself is able to load
-						if not HttpRbxApiService then
-							return
-						end
-						local ok, body = pcall(HttpRbxApiService.GetAsync, HttpRbxApiService, url)
-						if not ok or type(body) ~= "string" then
-							ok, body = pcall(
-								HttpRbxApiService.GetAsync,
-								HttpRbxApiService,
-								url,
-								Enum.ThrottlingPriority.Default,
-								Enum.HttpRequestType.Default
-							)
-						end
-						if ok and type(body) == "string" and #body > 8 then
-							return body
-						end
+					    if not apiAvailable or not HttpRbxApiService then
+					        record_attempt("HttpRbxApiService", url, apiError or "Service unavailable")
+					        return nil
+					    end
+					    -- Use only the client's existing permissions; report rejection rather than hiding it.
+					    local ok, body = pcall(function()
+					        return HttpRbxApiService:GetAsync(url)
+					    end)
+					    if not ok or type(body) ~= "string" then
+					        record_attempt("HttpRbxApiService.GetAsync", url, body)
+					        ok, body = pcall(function()
+					            return HttpRbxApiService:GetAsync(url,
+					                Enum.ThrottlingPriority.Default, Enum.HttpRequestType.Default)
+					        end)
+					    end
+					    if ok and type(body) == "string" and #body > 8 then
+					        return body
+					    end
+					    record_attempt("HttpRbxApiService.GetAsync", url,
+					        not ok and body or "Missing/short response body")
 					end
 
 					local function fetch_asset_id(id, depth)
@@ -4957,32 +4985,61 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					local total = #keys
 
 					if total > 0 then
-						if makefolder then
-							pcall(makefolder, assets_dir)
+						local function safe_write(path, data)
+						    local okWrite, writeError = pcall(writefile, path, data)
+						    if not okWrite or writeError == false then
+						        return false, tostring(writeError or "writefile returned false")
+						    end
+						    if readfile then
+						        local okRead, saved = pcall(readfile, path)
+						        if not okRead then return false, "Read-back failed: " .. tostring(saved) end
+						        if saved ~= data then return false, "Read-back differs from downloaded content" end
+						    end
+						    return true
 						end
 
-						local results, failed = {}, 0
-						local url_map = {}
+						if makefolder then
+						    local created, createError = pcall(makefolder, assets_dir)
+						    if not created then
+						        warn("[DownloadAssets] makefolder: " .. tostring(createError))
+						    end
+						end
+
+						table.sort(keys)
+						local results, failed, downloaded = {}, 0, 0
+						local url_map, failure_details = {}, {}
 						for i, key in ipairs(keys) do
-							if StatusText then
-								StatusText.Text = "Downloading Assets " .. i .. "/" .. total .. " (" .. key .. ")"
-							end
-							local body = wanted[key].fetch()
-							if body and not looks_like_error(body) then
-								local fname = key .. sniff_ext(body)
-								if pcall(writefile, assets_dir .. "/" .. fname, body) then
-									results[key] = "rbxasset://" .. assets_basename .. "/" .. fname
-								end
-							end
-							if not results[key] then
-								failed = failed + 1
-							end
-							if i >= 3 and failed == i then
-								break -- * Everything failing, most likely no network - bail early
-							end
-							if i % 4 == 0 then
-								wait_for_render()
-							end
+						    current_attempts = {}
+						    if StatusText then
+						        StatusText.Text = "Downloading Assets " .. i .. "/" .. total .. " (" .. key .. ")"
+						    end
+						    local fetched, body = pcall(wanted[key].fetch)
+						    if not fetched then
+						        record_attempt("fetch", key, body)
+						        body = nil
+						    end
+						    if type(body) == "string" and not looks_like_error(body) then
+						        local fname = key .. sniff_ext(body)
+						        local path = assets_dir .. "/" .. fname
+						        local stored, storeError = safe_write(path, body)
+						        if stored then
+						            results[key] = "rbxasset://" .. assets_basename .. "/" .. fname
+						            downloaded = downloaded + 1
+						        else
+						            record_attempt("writefile/readfile", path, storeError)
+						        end
+						    end
+						    if not results[key] then
+						        failed = failed + 1
+						        if #current_attempts == 0 then
+						            record_attempt("fetch", key, "No usable asset body returned")
+						        end
+						        failure_details[key] = current_attempts
+						        local last = current_attempts[#current_attempts]
+						        warn("[DownloadAssets] FAILED " .. key .. " [" .. last.route .. "]: " .. last.error)
+						    end
+						    -- Do not infer that all remaining assets are unavailable from three failures.
+						    if i % 4 == 0 then wait_for_render() end
 						end
 
 						local function replacement(url_raw)
@@ -5021,37 +5078,27 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 							end
 						end
 
-						pcall(function()
-							writefile(
-								assets_dir .. "/assets_map.json",
-								service.HttpService:JSONEncode(url_map)
-							)
-							writefile(
-								assets_dir .. "/INSTALL_ASSETS.bat",
-								table.concat({
-									"@echo off",
-									"setlocal enabledelayedexpansion",
-									'set "SRC=%~dp0"',
-									'for %%I in ("%SRC%.") do set "NAME=%%~nxI"',
-									'set "STUDIO="',
-									'for /d %%D in ("%LOCALAPPDATA%\\Roblox\\Versions\\version-*") do (',
-									'  if exist "%%D\\RobloxStudioBeta.exe" set "STUDIO=%%D"',
-									")",
-									'if not defined STUDIO for /d %%D in ("C:\\Program Files (x86)\\Roblox\\Versions\\version-*") do (',
-									'  if exist "%%D\\RobloxStudioBeta.exe" set "STUDIO=%%D"',
-									")",
-									"if not defined STUDIO (",
-									"  echo Roblox Studio was not found automatically.",
-									'  echo Manually copy the "%NAME%" folder into the "content" folder next to RobloxStudioBeta.exe',
-									"  pause",
-									"  exit /b 1",
-									")",
-									'xcopy "%SRC%*" "%STUDIO%\\content\\%NAME%\\" /E /I /Y',
-									'echo Done. Assets were copied to %STUDIO%\\content\\%NAME%',
-									"pause",
-								}, "\r\n")
-							)
-						end)
+						local function write_metadata(name, value)
+						    local encoded, data = pcall(service.HttpService.JSONEncode, service.HttpService, value)
+						    if not encoded then
+						        warn("[DownloadAssets] Cannot encode " .. name .. ": " .. tostring(data))
+						        return
+						    end
+						    if name == "assets_map.json" and next(value) == nil then data = "{}" end
+						    local stored, storeError = safe_write(assets_dir .. "/" .. name, data)
+						    if not stored then
+						        warn("[DownloadAssets] Cannot write " .. name .. ": " .. tostring(storeError))
+						    end
+						end
+						write_metadata("assets_map.json", url_map)
+						write_metadata("download_report.json", {
+						    total = total,
+						    attempted = total,
+						    downloadedFiles = downloaded,
+						    rewrittenUrls = written,
+						    failed = failed,
+						    failures = failure_details,
+						})
 
 						if StatusText then
 							StatusText.Text = "Assets: " .. written .. " saved, " .. failed .. " failed"
@@ -5061,7 +5108,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 								.. written
 								.. " URLs rewritten, assets stored in '"
 								.. assets_dir
-								.. "' (move it into Studio's content folder or run INSTALL_ASSETS.bat). "
+								.. "' (copy it into Studio's content folder; see download_report.json). "
 								.. failed
 								.. " asset(s) failed and kept remote URLs"
 						)
